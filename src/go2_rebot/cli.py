@@ -46,13 +46,15 @@ from .arm_control import (
 
 ARM_WATCHDOG_HZ = 2
 ARM_RECONNECT_INTERVAL = 5
+ARM_HOLD_HZ = 50
 
 
 class ArmManager:
     """Manages arm/gripper connection with automatic reconnection.
 
     Runs a background watchdog thread that monitors the serial port
-    and reconnects if it disappears and comes back.
+    and reconnects if it disappears and comes back. Also runs a hold
+    loop that keeps arm joints rigid at their current position.
     """
 
     def __init__(self, gp_state: ControllerState):
@@ -67,6 +69,9 @@ class ArmManager:
         self._handles = []
         self._grip_stop = threading.Event()
         self._grip_thread = None
+        self._hold_stop = threading.Event()
+        self._hold_thread = None
+        self._hold_paused = threading.Event()
         self._connected = False
         self._stop = threading.Event()
 
@@ -85,6 +90,14 @@ class ArmManager:
     @property
     def arm_handles(self):
         return self._handles[:self.n_arm]
+
+    def pause_hold(self):
+        """Pause the arm hold loop (for record/replay)."""
+        self._hold_paused.set()
+
+    def resume_hold(self):
+        """Resume the arm hold loop after record/replay."""
+        self._hold_paused.clear()
 
     def connect(self) -> bool:
         """Try to connect to arm motors. Returns True on success."""
@@ -109,6 +122,7 @@ class ArmManager:
                 time.sleep(0.3)
 
                 self._start_gripper()
+                self._start_hold()
                 self._connected = True
                 print("  Arm connected\n")
                 return True
@@ -121,6 +135,7 @@ class ArmManager:
     def disconnect(self):
         """Tear down arm connection."""
         with self._lock:
+            self._stop_hold()
             self._stop_gripper()
             if self._ctrl:
                 try:
@@ -148,6 +163,65 @@ class ArmManager:
         if self._grip_thread and self._grip_thread.is_alive():
             self._grip_thread.join(timeout=2.0)
         self._grip_thread = None
+
+    def _start_hold(self):
+        """Start background loop that holds arm joints in place."""
+        self._hold_stop = threading.Event()
+        self._hold_paused.clear()
+        self._hold_thread = threading.Thread(
+            target=self._hold_loop, daemon=True,
+        )
+        self._hold_thread.start()
+
+    def _stop_hold(self):
+        self._hold_stop.set()
+        if self._hold_thread and self._hold_thread.is_alive():
+            self._hold_thread.join(timeout=2.0)
+        self._hold_thread = None
+
+    def _hold_loop(self):
+        """Keep arm joints rigid at current position using MIT mode."""
+        dt = 1.0 / ARM_HOLD_HZ
+        arm_handles = self._handles[:self.n_arm]
+
+        try:
+            self._ctrl.poll_feedback_once()
+        except Exception:
+            pass
+        hold_pos = read_positions(arm_handles)
+
+        while not self._hold_stop.is_set():
+            if self._hold_paused.is_set():
+                time.sleep(0.05)
+                # Re-read positions when resuming so we hold the new pose
+                if not self._hold_paused.is_set():
+                    try:
+                        self._ctrl.poll_feedback_once()
+                    except Exception:
+                        pass
+                    hold_pos = read_positions(arm_handles)
+                continue
+
+            for i, (h, m) in enumerate(zip(arm_handles, self.arm_motors)):
+                try:
+                    h.send_mit(
+                        hold_pos[i], 0.0,
+                        m["mit_kp"], m["mit_kd"], 0.0,
+                    )
+                except CallError:
+                    pass
+
+            try:
+                self._ctrl.poll_feedback_once()
+            except Exception:
+                pass
+
+            # Update hold target to track slow drift (e.g. gravity settling)
+            cur = read_positions(arm_handles)
+            for i in range(len(hold_pos)):
+                hold_pos[i] = cur[i]
+
+            time.sleep(dt)
 
     def _port_exists(self) -> bool:
         return os.path.exists(self.channel)
@@ -414,16 +488,20 @@ def main():
 
             if arm and arm.connected and up_edge.update(keys):
                 if replay_tap.tap():
+                    arm.pause_hold()
                     _do_replay(arm.ctrl, arm.arm_handles, arm.arm_motors,
                                arm.handles, arm.all_motors, rumble, args,
                                active_recording[0])
+                    arm.resume_hold()
                     record_tap.reset()
 
             if arm and arm.connected and down_edge.update(keys):
                 if record_tap.tap():
+                    arm.pause_hold()
                     result = _do_record(arm.ctrl, arm.handles, arm.all_motors,
                                         arm.arm_motors, arm.arm_names,
                                         rumble, args)
+                    arm.resume_hold()
                     if result:
                         active_recording[0] = result
                     replay_tap.reset()
