@@ -24,8 +24,16 @@ from go2_driver.gamepad import (
     gamepad_loop,
     validate_gamepad,
 )
+from motorbridge import CallError
 
 from . import safety  # noqa: F401  (import side-effect: extends BLOCKED_COMBOS)
+from .arm_cli import gripper_loop
+from .arm_control import (
+    load_motors,
+    make_controller,
+    register_motors,
+    shutdown as motor_shutdown,
+)
 
 
 def _go2_send_loop(
@@ -106,6 +114,11 @@ def main():
         default=-1,
         metavar="SECONDS",
         help="Wait for gamepad to connect (0 = wait forever, -1 = no wait [default])",
+    )
+    parser.add_argument(
+        "--no-arm",
+        action="store_true",
+        help="Skip arm/gripper motor connection",
     )
 
     args = parser.parse_args()
@@ -193,6 +206,39 @@ def main():
             dry_run=True,
         )
 
+    # ── Arm/gripper connection (optional) ─────────────────────────
+    motor_ctrl = None
+    grip_stop = threading.Event()
+
+    if not args.no_arm:
+        try:
+            channel, arm_motors, grip_motors = load_motors()
+            all_motors = arm_motors + grip_motors
+            n_arm = len(arm_motors)
+            print(f"  Connecting {len(all_motors)} arm motors on {channel}...")
+            motor_ctrl = make_controller(channel)
+            handles = register_motors(motor_ctrl, all_motors)
+            for m in all_motors:
+                print(f"    {m['name']}: id=0x{m['motor_id']:02x} model={m['model']}")
+
+            from motorbridge import Mode
+            for h in handles:
+                try:
+                    h.ensure_mode(Mode.MIT, 1000)
+                except CallError:
+                    pass
+                time.sleep(0.05)
+            try:
+                motor_ctrl.enable_all()
+            except CallError:
+                pass
+            time.sleep(0.3)
+            print("  Arm connected\n")
+        except Exception as e:
+            print(f"  [warn] Arm not available: {e}")
+            print("  Continuing without arm...\n")
+            motor_ctrl = None
+
     # ── Start threads ─────────────────────────────────────────────
     state = ControllerState()
     stop_event = threading.Event()
@@ -211,6 +257,17 @@ def main():
     )
     display_thread.start()
 
+    # Start gripper thread if arm is connected
+    if motor_ctrl and grip_motors:
+        grip_handle = handles[n_arm]
+        grip_thread = threading.Thread(
+            target=gripper_loop,
+            args=(motor_ctrl, grip_handle, grip_motors[0], state, grip_stop),
+            daemon=True,
+        )
+        grip_thread.start()
+        print("  Gripper: L2=open, R2=close\n")
+
     # ── Main gamepad loop (blocks) ────────────────────────────────
     try:
         gamepad_loop(device, state, stop_event)
@@ -222,7 +279,12 @@ def main():
     # ── Cleanup ───────────────────────────────────────────────────
     print("\n  Shutting down...")
     stop_event.set()
+    grip_stop.set()
     rumble.cleanup()
+
+    if motor_ctrl:
+        motor_shutdown(motor_ctrl)
+        print("  Arm disconnected")
 
     if go2_conn:
         go2_conn.disconnect()
