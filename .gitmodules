@@ -1,0 +1,3 @@
+[submodule "go2-driver"]
+	path = go2-driver
+	url = https://github.com/meetsitaram/go2-driver.git

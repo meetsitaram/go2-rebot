@@ -38,7 +38,16 @@ Speed is capped at 50% by default (`--speed-limit 0.5`).
 | Start               | Walking mode                        |
 | Select              | Standing mode                       |
 | LT + A              | Lock posture (stand/crouch toggle)  |
-| LT + B              | Damp (motors off)                   |
+
+### Safety Blocklist
+
+Every combo below is **blocked by default** in `go2-rebot` (use `--allow-all` to enable with countdown). The action key is stripped from the controller state, so the modifier (LT/RT/LB/RB/D-pad) remains usable on its own.
+
+These extra blocks live in `src/go2_rebot/safety.py` and are appended to `go2_driver`'s default blocklist on import — the driver itself is not modified.
+
+| Combo               | Go2 Action                          |
+|---------------------|-------------------------------------|
+| LT + B              | Damp -- motors off, robot collapses |
 | LT + X              | Stand up from fall                  |
 | LT + Select         | Searchlight toggle                  |
 | RT + A              | Stretch                             |
@@ -49,23 +58,14 @@ Speed is capped at 50% by default (`--speed-limit 0.5`).
 | RB + B              | Sit down                            |
 | LB + A              | Greet                               |
 | LB + B              | Dance                               |
+| LB + Select         | Endurance mode                      |
 | D-Right + Start     | Stair mode 1 (fwd up / bwd down)    |
 | D-Left + Select     | Stair mode 2 (fwd down)             |
-| LB + Select         | Endurance mode                      |
-| L-stick click       | F1 (spare)                          |
-| R-stick click       | F2 (spare)                          |
-
-### Safety Blocklist
-
-These combos are **blocked by default** (use `--allow-all` to enable with countdown):
-
-| Combo        | Action                              |
-|--------------|-------------------------------------|
-| LT + B       | Damp -- motors off, robot collapses |
-| RB + A       | Jump forward                        |
-| RB + X       | Pounce                              |
 
 With `--allow-all`, blocked combos require a 3-vibration hold countdown before sending.
+
+> **Note:** the L-stick / R-stick clicks (`F1` / `F2`) are intentionally
+> left unblocked — they're reserved for future rebot-specific commands.
 
 ### Emergency Stop
 
@@ -211,21 +211,112 @@ journalctl -u go2-rebot -f
 
 ---
 
+## Arm Record/Replay
+
+The `go2-rebot-arm` command provides Xbox-controlled arm trajectory recording and replay, plus gripper control. Runs fully headless (no keyboard/monitor needed).
+
+### Xbox Arm Controls
+
+| Xbox Input       | Action                        |
+|------------------|-------------------------------|
+| D-pad UP x3      | Replay latest recording       |
+| D-pad DOWN x5    | Start recording               |
+| L2 (hold)        | Open gripper                  |
+| R2 (hold)        | Close gripper                 |
+| Ctrl+C           | Shutdown                      |
+
+### Recording Flow
+
+1. Press D-pad DOWN 5 times to enter record mode
+2. Arm enters zero-torque (FREEDRIVE) — move it by hand to the start position
+3. Hold still for ~5 seconds — arm auto-locks (HOLDING)
+4. **Shake the arm** to start recording, arm releases to FREEDRIVE
+5. Perform your motion
+6. Hold still at the end position — arm auto-locks again
+7. **Shake again** to stop and save the recording
+
+Recordings are saved as CSV files in `recordings/` with timestamps.
+
+### Replay Flow
+
+1. Press D-pad UP 3 times to replay the latest recording
+2. Arm moves to the start position automatically (rate-limited, safe)
+3. Trajectory plays back at original speed
+4. Returns to idle when done
+
+### Running
+
+```bash
+# Basic usage (waits for Xbox controller)
+go2-rebot-arm
+
+# Zero encoders at HOME position first
+go2-rebot-arm --zero
+
+# Replay a specific file
+go2-rebot-arm --file recordings/wave_20260423_140000.csv
+
+# Save recordings with a name
+go2-rebot-arm --name pick
+
+# List saved recordings
+go2-rebot-arm --list
+
+# Don't wait for gamepad (fail immediately if not found)
+go2-rebot-arm --wait-for-gamepad -1
+```
+
+### Arm Config
+
+Joint limits and motor parameters are in `config/arm.yaml` and `config/gripper.yaml`. These were calibrated using `calibrate_limits.py` in `reBotArm_control_py`. Re-run calibration if the arm is reassembled or encoder zeros are lost.
+
+---
+
 ## File Layout
 
 ```
 go2-rebot/
   src/go2_rebot/
     __init__.py
-    cli.py                 # Main service (gamepad → Go2 send loop)
+    cli.py                 # Go2 bridge (gamepad → Go2 send loop)
+    safety.py              # Rebot-specific BLOCKED_COMBOS extensions
+    arm_cli.py             # Arm record/replay CLI (Xbox-controlled)
+    arm_control.py         # Arm motor logic (record, replay, gripper)
+  config/
+    arm.yaml               # Arm joint limits and motor parameters
+    gripper.yaml           # Gripper motor config
+  recordings/              # Saved trajectory CSVs (auto-created)
+  go2-driver/              # git submodule → meetsitaram/go2-driver
   go2-rebot.service        # systemd unit file
   headless-start.sh        # Boot wrapper (WiFi scan + launch)
   install-service.sh       # Service install/uninstall helper
   start.sh                 # Manual start (activates venv)
   stop.sh                  # Quick stop (systemctl stop)
   pyproject.toml           # Package metadata and dependencies
+  .gitmodules              # Submodule pin for go2-driver
   docs/
     README.md              # This file
+```
+
+---
+
+## Cloning
+
+`go2-driver` is vendored as a git submodule, so clone with `--recursive`
+(or run `git submodule update --init` after a plain clone):
+
+```bash
+git clone --recursive https://github.com/meetsitaram/go2-rebot.git
+# or
+git clone https://github.com/meetsitaram/go2-rebot.git
+cd go2-rebot
+git submodule update --init
+```
+
+To pull the latest driver later:
+
+```bash
+git submodule update --remote go2-driver
 ```
 
 ---

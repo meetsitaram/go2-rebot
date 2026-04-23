@@ -25,6 +25,8 @@ from go2_driver.gamepad import (
     validate_gamepad,
 )
 
+from . import safety  # noqa: F401  (import side-effect: extends BLOCKED_COMBOS)
+
 
 def _go2_send_loop(
     go2_conn,
