@@ -72,7 +72,7 @@ class MultiTap:
 
 GRIPPER_SPEED_RAD_PER_S = math.radians(90.0)
 GRIPPER_HZ = 50
-GRIPPER_MIT_KP = 5.0   # grip strength — raise for firmer hold, lower for softer
+GRIPPER_MIT_KP = 10.0  # grip strength — raise for firmer hold, lower for softer
 GRIPPER_MIT_KD = 0.5
 
 
