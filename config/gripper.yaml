@@ -13,6 +13,6 @@ gripper:
   POS_VEL:
     vel_kp: 0.0008
     vel_ki: 0.002
-    pos_kp: 50.0
-    pos_ki: 1.0
-    vlim: 3.0
+    pos_kp: 45.0
+    pos_ki: 0.2
+    vlim: 6.0

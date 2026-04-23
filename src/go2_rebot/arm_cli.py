@@ -70,8 +70,10 @@ class MultiTap:
 
 # ── Gripper controller ────────────────────────────────────────────────
 
-GRIPPER_SPEED_RAD_PER_S = math.radians(30.0)
+GRIPPER_SPEED_RAD_PER_S = math.radians(90.0)
 GRIPPER_HZ = 50
+GRIPPER_MIT_KP = 3.0   # grip strength — raise for firmer hold, lower for softer
+GRIPPER_MIT_KD = 0.5
 
 
 def gripper_loop(
@@ -81,23 +83,15 @@ def gripper_loop(
     state: ControllerState,
     stop_event: threading.Event,
 ):
-    """Background thread: drive gripper based on L2/R2 triggers."""
+    """Background thread: drive gripper via MIT mode (low kp = soft grip)."""
     dt = 1.0 / GRIPPER_HZ
     lo = grip_motor["limit_lower_rad"] or -math.pi
     hi = grip_motor["limit_upper_rad"] or math.pi
-    vlim = grip_motor["vlim"]
+    kp = GRIPPER_MIT_KP
+    kd = GRIPPER_MIT_KD
 
-    # Write POS_VEL PI registers for gripper
     try:
-        grip_handle.write_register_f32(25, grip_motor["vel_kp"])
-        grip_handle.write_register_f32(26, grip_motor["vel_ki"])
-        grip_handle.write_register_f32(27, grip_motor["pos_kp"])
-        grip_handle.write_register_f32(28, grip_motor["pos_ki"])
-        time.sleep(0.02)
-    except Exception as e:
-        print(f"  [warn] gripper PI write: {e}")
-    try:
-        grip_handle.ensure_mode(Mode.POS_VEL, 1000)
+        grip_handle.ensure_mode(Mode.MIT, 1000)
     except CallError as e:
         print(f"  [warn] gripper mode switch: {e}")
 
@@ -113,15 +107,27 @@ def gripper_loop(
         target = 0.0
 
     while not stop_event.is_set():
+        try:
+            st = grip_handle.get_state()
+            if st is not None:
+                actual = st.pos
+            else:
+                actual = target
+        except Exception:
+            actual = target
+
         keys = state.to_dict()["keys"]
         if keys & KEY_L2:
-            target += GRIPPER_SPEED_RAD_PER_S * dt
-        elif keys & KEY_R2:
             target -= GRIPPER_SPEED_RAD_PER_S * dt
+        elif keys & KEY_R2:
+            target += GRIPPER_SPEED_RAD_PER_S * dt
+        else:
+            target = actual
+
         target = max(lo, min(hi, target))
 
         try:
-            grip_handle.send_pos_vel(float(target), vlim)
+            grip_handle.send_mit(float(target), 0.0, kp, kd, 0.0)
         except CallError:
             pass
         try:
@@ -336,7 +342,8 @@ def _do_record(args, ctrl, handles, all_motors, arm_motors, arm_names,
         rumble.pulse()
 
     # Re-enable MIT mode on arm motors (they may be in POS_VEL from replay)
-    for i, h in enumerate(handles):
+    n_arm = len(arm_motors)
+    for h in handles[:n_arm]:
         try:
             h.ensure_mode(Mode.MIT, 1000)
         except CallError:
@@ -371,8 +378,8 @@ def _do_record(args, ctrl, handles, all_motors, arm_motors, arm_names,
     if filepath:
         print(f"  Recording saved: {filepath.name}")
 
-    # Re-enable for idle
-    for i, h in enumerate(handles):
+    # Re-enable arm motors for idle (skip gripper — it stays POS_VEL)
+    for h in handles[:n_arm]:
         try:
             h.ensure_mode(Mode.MIT, 1000)
         except CallError:
@@ -446,8 +453,8 @@ def _do_replay(args, ctrl, arm_handles, arm_motors, handles, all_motors,
         time.sleep(0.15)
         rumble.pulse()
 
-    # Switch back to MIT for idle
-    for i, h in enumerate(handles):
+    # Switch arm motors back to MIT for idle (skip gripper — it stays POS_VEL)
+    for h in arm_handles:
         try:
             h.ensure_mode(Mode.MIT, 1000)
         except CallError:
