@@ -298,6 +298,11 @@ def main():
     arm_handles = handles[:n_arm] if motor_ctrl else []
     arm_names = [m["name"] for m in arm_motors] if motor_ctrl else []
 
+    from .arm_control import RECORDINGS_DIR
+    from pathlib import Path
+    default_recording = RECORDINGS_DIR / "pick_plushy_and give.csv"
+    active_recording = [default_recording if default_recording.exists() else None]
+
     try:
         while not gp_stop.is_set():
             keys = state.to_dict()["keys"]
@@ -305,13 +310,16 @@ def main():
             if motor_ctrl and up_edge.update(keys):
                 if replay_tap.tap():
                     _do_replay(motor_ctrl, arm_handles, arm_motors,
-                               handles, all_motors, rumble, args)
+                               handles, all_motors, rumble, args,
+                               active_recording[0])
                     record_tap.reset()
 
             if motor_ctrl and down_edge.update(keys):
                 if record_tap.tap():
-                    _do_record(motor_ctrl, handles, all_motors, arm_motors,
-                               arm_names, rumble, args)
+                    result = _do_record(motor_ctrl, handles, all_motors,
+                                        arm_motors, arm_names, rumble, args)
+                    if result:
+                        active_recording[0] = result
                     replay_tap.reset()
 
             time.sleep(0.02)
@@ -392,6 +400,7 @@ def _do_record(ctrl, handles, all_motors, arm_motors, arm_names, rumble, args):
     filepath = save_recording(samples, arm_names, name=name)
     if filepath:
         print(f"  Recording saved: {filepath.name}")
+        print(f"  Active recording set to: {filepath.name}")
 
     for h in handles[:n_arm]:
         try:
@@ -406,17 +415,24 @@ def _do_record(ctrl, handles, all_motors, arm_motors, arm_names, rumble, args):
     time.sleep(0.2)
 
     print("  IDLE — waiting for command...")
+    return filepath
 
 
 # ── Replay action ─────────────────────────────────────────────────────
 
-def _do_replay(ctrl, arm_handles, arm_motors, handles, all_motors, rumble, args):
+def _do_replay(ctrl, arm_handles, arm_motors, handles, all_motors, rumble, args,
+               active_file=None):
     from motorbridge import Mode
     from pathlib import Path
 
     n_arm = len(arm_motors)
-    file_path = Path(args.file) if getattr(args, "file", "") else None
-    name = getattr(args, "name", "")
+    if active_file:
+        file_path = active_file
+    elif getattr(args, "file", ""):
+        file_path = Path(args.file)
+    else:
+        file_path = None
+    name = getattr(args, "name", "") if not file_path else ""
     timestamps, positions, col_names, resolved = load_recording(
         filepath=file_path, name=name,
     )
