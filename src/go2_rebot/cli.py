@@ -9,12 +9,13 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 import sys
 import threading
 import time
 
 from go2_driver.connection import Go2Connection
-from go2_driver.constants import SEND_RATE
+from go2_driver.constants import KEY_DOWN, KEY_UP, SEND_RATE
 from go2_driver.gamepad import (
     ControllerState,
     RumbleHelper,
@@ -24,7 +25,6 @@ from go2_driver.gamepad import (
     gamepad_loop,
     validate_gamepad,
 )
-from go2_driver.constants import KEY_DOWN, KEY_UP
 from motorbridge import CallError
 
 from . import safety  # noqa: F401  (import side-effect: extends BLOCKED_COMBOS)
@@ -40,6 +40,151 @@ from .arm_control import (
     save_recording,
     shutdown as motor_shutdown,
 )
+
+
+# ── Arm manager with auto-reconnect watchdog ─────────────────────────
+
+ARM_WATCHDOG_HZ = 2
+ARM_RECONNECT_INTERVAL = 5
+
+
+class ArmManager:
+    """Manages arm/gripper connection with automatic reconnection.
+
+    Runs a background watchdog thread that monitors the serial port
+    and reconnects if it disappears and comes back.
+    """
+
+    def __init__(self, gp_state: ControllerState):
+        self.channel, self.arm_motors, self.grip_motors = load_motors()
+        self.all_motors = self.arm_motors + self.grip_motors
+        self.n_arm = len(self.arm_motors)
+        self.arm_names = [m["name"] for m in self.arm_motors]
+        self.gp_state = gp_state
+
+        self._lock = threading.Lock()
+        self._ctrl = None
+        self._handles = []
+        self._grip_stop = threading.Event()
+        self._grip_thread = None
+        self._connected = False
+        self._stop = threading.Event()
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @property
+    def ctrl(self):
+        return self._ctrl
+
+    @property
+    def handles(self):
+        return self._handles
+
+    @property
+    def arm_handles(self):
+        return self._handles[:self.n_arm]
+
+    def connect(self) -> bool:
+        """Try to connect to arm motors. Returns True on success."""
+        with self._lock:
+            try:
+                self._ctrl = make_controller(self.channel)
+                self._handles = register_motors(self._ctrl, self.all_motors)
+                for m in self.all_motors:
+                    print(f"    {m['name']}: id=0x{m['motor_id']:02x} model={m['model']}")
+
+                from motorbridge import Mode
+                for h in self._handles:
+                    try:
+                        h.ensure_mode(Mode.MIT, 1000)
+                    except CallError:
+                        pass
+                    time.sleep(0.05)
+                try:
+                    self._ctrl.enable_all()
+                except CallError:
+                    pass
+                time.sleep(0.3)
+
+                self._start_gripper()
+                self._connected = True
+                print("  Arm connected\n")
+                return True
+            except Exception as e:
+                self._ctrl = None
+                self._handles = []
+                self._connected = False
+                return False
+
+    def disconnect(self):
+        """Tear down arm connection."""
+        with self._lock:
+            self._stop_gripper()
+            if self._ctrl:
+                try:
+                    motor_shutdown(self._ctrl)
+                except Exception:
+                    pass
+                self._ctrl = None
+            self._handles = []
+            self._connected = False
+
+    def _start_gripper(self):
+        if self.grip_motors and len(self._handles) > self.n_arm:
+            self._grip_stop = threading.Event()
+            grip_handle = self._handles[self.n_arm]
+            self._grip_thread = threading.Thread(
+                target=gripper_loop,
+                args=(self._ctrl, grip_handle, self.grip_motors[0],
+                      self.gp_state, self._grip_stop),
+                daemon=True,
+            )
+            self._grip_thread.start()
+
+    def _stop_gripper(self):
+        self._grip_stop.set()
+        if self._grip_thread and self._grip_thread.is_alive():
+            self._grip_thread.join(timeout=2.0)
+        self._grip_thread = None
+
+    def _port_exists(self) -> bool:
+        return os.path.exists(self.channel)
+
+    def start_watchdog(self):
+        """Start background watchdog thread."""
+        t = threading.Thread(target=self._watchdog_loop, daemon=True)
+        t.start()
+
+    def _watchdog_loop(self):
+        """Monitor arm health; reconnect on disconnect."""
+        was_connected = self._connected
+        while not self._stop.is_set():
+            port_ok = self._port_exists()
+
+            if self._connected and not port_ok:
+                print(f"\n  [arm] Serial port {self.channel} lost — arm disconnected")
+                self.disconnect()
+                was_connected = False
+
+            if not self._connected and port_ok:
+                if was_connected:
+                    print(f"  [arm] Serial port {self.channel} back — reconnecting...")
+                else:
+                    print(f"  [arm] Trying {self.channel}...")
+                if self.connect():
+                    was_connected = True
+                else:
+                    time.sleep(ARM_RECONNECT_INTERVAL)
+                    continue
+
+            time.sleep(1.0 / ARM_WATCHDOG_HZ)
+
+    def shutdown(self):
+        """Stop watchdog and disconnect."""
+        self._stop.set()
+        self.disconnect()
 
 
 def _go2_send_loop(
@@ -221,39 +366,6 @@ def main():
             dry_run=True,
         )
 
-    # ── Arm/gripper connection (optional) ─────────────────────────
-    motor_ctrl = None
-    grip_stop = threading.Event()
-
-    if not args.no_arm:
-        try:
-            channel, arm_motors, grip_motors = load_motors()
-            all_motors = arm_motors + grip_motors
-            n_arm = len(arm_motors)
-            print(f"  Connecting {len(all_motors)} arm motors on {channel}...")
-            motor_ctrl = make_controller(channel)
-            handles = register_motors(motor_ctrl, all_motors)
-            for m in all_motors:
-                print(f"    {m['name']}: id=0x{m['motor_id']:02x} model={m['model']}")
-
-            from motorbridge import Mode
-            for h in handles:
-                try:
-                    h.ensure_mode(Mode.MIT, 1000)
-                except CallError:
-                    pass
-                time.sleep(0.05)
-            try:
-                motor_ctrl.enable_all()
-            except CallError:
-                pass
-            time.sleep(0.3)
-            print("  Arm connected\n")
-        except Exception as e:
-            print(f"  [warn] Arm not available: {e}")
-            print("  Continuing without arm...\n")
-            motor_ctrl = None
-
     # ── Start threads ─────────────────────────────────────────────
     state = ControllerState()
     stop_event = threading.Event()
@@ -272,16 +384,12 @@ def main():
     )
     display_thread.start()
 
-    # Start gripper thread if arm is connected
-    if motor_ctrl and grip_motors:
-        grip_handle = handles[n_arm]
-        grip_thread = threading.Thread(
-            target=gripper_loop,
-            args=(motor_ctrl, grip_handle, grip_motors[0], state, grip_stop),
-            daemon=True,
-        )
-        grip_thread.start()
-        print("  Gripper: L2=open, R2=close\n")
+    # ── Arm/gripper with auto-reconnect watchdog ──────────────────
+    arm = None
+    if not args.no_arm:
+        arm = ArmManager(state)
+        arm.connect()
+        arm.start_watchdog()
 
     # ── Main loop: gamepad reading + D-pad arm commands ──────────
     gp_stop = threading.Event()
@@ -295,9 +403,6 @@ def main():
     up_edge = ButtonEdge(KEY_UP)
     down_edge = ButtonEdge(KEY_DOWN)
 
-    arm_handles = handles[:n_arm] if motor_ctrl else []
-    arm_names = [m["name"] for m in arm_motors] if motor_ctrl else []
-
     from .arm_control import RECORDINGS_DIR
     from pathlib import Path
     default_recording = RECORDINGS_DIR / "pick_plushy_and give.csv"
@@ -307,17 +412,18 @@ def main():
         while not gp_stop.is_set():
             keys = state.to_dict()["keys"]
 
-            if motor_ctrl and up_edge.update(keys):
+            if arm and arm.connected and up_edge.update(keys):
                 if replay_tap.tap():
-                    _do_replay(motor_ctrl, arm_handles, arm_motors,
-                               handles, all_motors, rumble, args,
+                    _do_replay(arm.ctrl, arm.arm_handles, arm.arm_motors,
+                               arm.handles, arm.all_motors, rumble, args,
                                active_recording[0])
                     record_tap.reset()
 
-            if motor_ctrl and down_edge.update(keys):
+            if arm and arm.connected and down_edge.update(keys):
                 if record_tap.tap():
-                    result = _do_record(motor_ctrl, handles, all_motors,
-                                        arm_motors, arm_names, rumble, args)
+                    result = _do_record(arm.ctrl, arm.handles, arm.all_motors,
+                                        arm.arm_motors, arm.arm_names,
+                                        rumble, args)
                     if result:
                         active_recording[0] = result
                     replay_tap.reset()
@@ -333,11 +439,10 @@ def main():
     print("\n  Shutting down...")
     stop_event.set()
     gp_stop.set()
-    grip_stop.set()
     rumble.cleanup()
 
-    if motor_ctrl:
-        motor_shutdown(motor_ctrl)
+    if arm:
+        arm.shutdown()
         print("  Arm disconnected")
 
     if go2_conn:
