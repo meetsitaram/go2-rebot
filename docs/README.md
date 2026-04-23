@@ -38,12 +38,16 @@ Speed is capped at 50% by default (`--speed-limit 0.5`).
 | Start               | Walking mode                        |
 | Select              | Standing mode                       |
 | LT + A              | Lock posture (stand/crouch toggle)  |
+| L2 (hold)           | Open gripper                        |
+| R2 (hold)           | Close gripper                       |
+| D-pad UP x3         | Replay latest arm recording         |
+| D-pad DOWN x5       | Record arm trajectory               |
 
 ### Safety Blocklist
 
 Every combo below is **blocked by default** in `go2-rebot` (use `--allow-all` to enable with countdown). The action key is stripped from the controller state, so the modifier (LT/RT/LB/RB/D-pad) remains usable on its own.
 
-These extra blocks live in `src/go2_rebot/safety.py` and are appended to `go2_driver`'s default blocklist on import — the driver itself is not modified.
+These blocks combine `go2_driver`'s defaults (Damp, Jump, Pounce) with `src/go2_rebot/safety.py` extensions — the driver itself is not modified.
 
 | Combo               | Go2 Action                          |
 |---------------------|-------------------------------------|
@@ -100,6 +104,9 @@ go2-rebot --connection-mode ap
 | `--wait-for-gamepad N`    | Wait N seconds for controller (0=forever)|
 | `--speed-limit 0.5`       | Cap joystick output (0.0-1.0)            |
 | `--allow-all`             | Allow dangerous combos with countdown    |
+| `--no-arm`                | Skip arm/gripper motor connection        |
+| `--name NAME`             | Recording name for save/load             |
+| `--file PATH`             | Explicit CSV file path for replay        |
 
 ---
 

@@ -24,14 +24,20 @@ from go2_driver.gamepad import (
     gamepad_loop,
     validate_gamepad,
 )
+from go2_driver.constants import KEY_DOWN, KEY_UP
 from motorbridge import CallError
 
 from . import safety  # noqa: F401  (import side-effect: extends BLOCKED_COMBOS)
-from .arm_cli import gripper_loop
+from .arm_cli import ButtonEdge, MultiTap, gripper_loop
 from .arm_control import (
     load_motors,
+    load_recording,
     make_controller,
+    read_positions,
+    record_trajectory,
     register_motors,
+    replay_trajectory,
+    save_recording,
     shutdown as motor_shutdown,
 )
 
@@ -120,6 +126,12 @@ def main():
         action="store_true",
         help="Skip arm/gripper motor connection",
     )
+    parser.add_argument("--name", type=str, default="",
+                        help="Recording name for save/load")
+    parser.add_argument("--file", type=str, default="",
+                        help="Explicit CSV file path for replay")
+    parser.add_argument("--hz", type=int, default=100,
+                        help="Recording sample rate (default: 100)")
 
     args = parser.parse_args()
     args.speed_limit = max(0.0, min(1.0, args.speed_limit))
@@ -177,6 +189,9 @@ def main():
     print("    Right stick       → yaw / look")
     print("    Start             → walking mode")
     print("    Select            → standing mode")
+    print("    L2 / R2           → gripper open / close")
+    print("    D-pad UP   x3    → replay arm recording")
+    print("    D-pad DOWN x5    → record arm trajectory")
     print("    Ctrl+C            → quit\n")
 
     # ── Go2 connection ────────────────────────────────────────────
@@ -268,9 +283,39 @@ def main():
         grip_thread.start()
         print("  Gripper: L2=open, R2=close\n")
 
-    # ── Main gamepad loop (blocks) ────────────────────────────────
+    # ── Main loop: gamepad reading + D-pad arm commands ──────────
+    gp_stop = threading.Event()
+    gp_thread = threading.Thread(
+        target=gamepad_loop, args=(device, state, gp_stop), daemon=True,
+    )
+    gp_thread.start()
+
+    replay_tap = MultiTap(required=3, window_s=1.5)
+    record_tap = MultiTap(required=5, window_s=2.5)
+    up_edge = ButtonEdge(KEY_UP)
+    down_edge = ButtonEdge(KEY_DOWN)
+
+    arm_handles = handles[:n_arm] if motor_ctrl else []
+    arm_names = [m["name"] for m in arm_motors] if motor_ctrl else []
+
     try:
-        gamepad_loop(device, state, stop_event)
+        while not gp_stop.is_set():
+            keys = state.to_dict()["keys"]
+
+            if motor_ctrl and up_edge.update(keys):
+                if replay_tap.tap():
+                    _do_replay(motor_ctrl, arm_handles, arm_motors,
+                               handles, all_motors, rumble, args)
+                    record_tap.reset()
+
+            if motor_ctrl and down_edge.update(keys):
+                if record_tap.tap():
+                    _do_record(motor_ctrl, handles, all_motors, arm_motors,
+                               arm_names, rumble, args)
+                    replay_tap.reset()
+
+            time.sleep(0.02)
+
     except KeyboardInterrupt:
         pass
     except OSError as e:
@@ -279,6 +324,7 @@ def main():
     # ── Cleanup ───────────────────────────────────────────────────
     print("\n  Shutting down...")
     stop_event.set()
+    gp_stop.set()
     grip_stop.set()
     rumble.cleanup()
 
@@ -291,6 +337,150 @@ def main():
         print("  Go2 disconnected")
 
     print("  Done.\n")
+
+
+# ── Record action ─────────────────────────────────────────────────────
+
+def _do_record(ctrl, handles, all_motors, arm_motors, arm_names, rumble, args):
+    from motorbridge import Mode
+    import numpy as np
+
+    n_arm = len(arm_motors)
+    print("\n  ╔══════════════════════════════════╗")
+    print("  ║  RECORD MODE                     ║")
+    print("  ║  Shake arm to START, shake to STOP║")
+    print("  ╚══════════════════════════════════╝\n")
+
+    if rumble.available:
+        rumble.pulse()
+        time.sleep(0.15)
+        rumble.pulse()
+
+    for h in handles[:n_arm]:
+        try:
+            h.ensure_mode(Mode.MIT, 1000)
+        except CallError:
+            pass
+        time.sleep(0.05)
+    try:
+        ctrl.enable_all()
+    except CallError:
+        pass
+    time.sleep(0.2)
+
+    rec_stop = threading.Event()
+
+    def _on_phase(phase):
+        if phase == "RECORDING":
+            print("  ● RECORDING — perform motion, shake to stop")
+            if rumble.available:
+                rumble.pulse()
+        elif phase == "DONE":
+            print("  ■ DONE")
+            if rumble.available:
+                rumble.pulse()
+                time.sleep(0.15)
+                rumble.pulse()
+
+    samples = record_trajectory(
+        ctrl, handles, all_motors, arm_motors,
+        hz=getattr(args, "hz", 100), stop_event=rec_stop,
+        on_phase_change=_on_phase,
+    )
+
+    name = getattr(args, "name", "")
+    filepath = save_recording(samples, arm_names, name=name)
+    if filepath:
+        print(f"  Recording saved: {filepath.name}")
+
+    for h in handles[:n_arm]:
+        try:
+            h.ensure_mode(Mode.MIT, 1000)
+        except CallError:
+            pass
+        time.sleep(0.05)
+    try:
+        ctrl.enable_all()
+    except CallError:
+        pass
+    time.sleep(0.2)
+
+    print("  IDLE — waiting for command...")
+
+
+# ── Replay action ─────────────────────────────────────────────────────
+
+def _do_replay(ctrl, arm_handles, arm_motors, handles, all_motors, rumble, args):
+    from motorbridge import Mode
+    from pathlib import Path
+
+    n_arm = len(arm_motors)
+    file_path = Path(args.file) if getattr(args, "file", "") else None
+    name = getattr(args, "name", "")
+    timestamps, positions, col_names, resolved = load_recording(
+        filepath=file_path, name=name,
+    )
+    if timestamps is None:
+        print("  No recording to replay.")
+        if rumble.available:
+            for _ in range(3):
+                rumble.pulse()
+                time.sleep(0.1)
+        return
+
+    print(f"\n  ▶ REPLAY: {resolved.name}  ({len(timestamps)} samples, {timestamps[-1]:.1f}s)")
+    if rumble.available:
+        rumble.pulse()
+
+    for i, (h, m) in enumerate(zip(arm_handles, arm_motors)):
+        try:
+            h.write_register_f32(25, m["vel_kp"])
+            h.write_register_f32(26, m["vel_ki"])
+            h.write_register_f32(27, m["pos_kp"])
+            h.write_register_f32(28, m["pos_ki"])
+            time.sleep(0.02)
+        except Exception:
+            pass
+        try:
+            h.ensure_mode(Mode.POS_VEL, 1000)
+        except CallError:
+            pass
+        time.sleep(0.05)
+
+    try:
+        ctrl.enable_all()
+    except CallError:
+        pass
+    time.sleep(0.2)
+
+    replay_stop = threading.Event()
+
+    def _on_progress(pct):
+        print(f"\r  Progress: {pct * 100:5.1f}%", end="", flush=True)
+
+    completed = replay_trajectory(
+        ctrl, arm_handles, arm_motors, timestamps, positions,
+        stop_event=replay_stop, on_progress=_on_progress,
+    )
+
+    if completed and rumble.available:
+        rumble.pulse()
+        time.sleep(0.15)
+        rumble.pulse()
+
+    for h in arm_handles:
+        try:
+            h.ensure_mode(Mode.MIT, 1000)
+        except CallError:
+            pass
+        time.sleep(0.05)
+    try:
+        ctrl.enable_all()
+    except CallError:
+        pass
+    time.sleep(0.2)
+
+    print("\n  IDLE — waiting for command...")
 
 
 if __name__ == "__main__":
