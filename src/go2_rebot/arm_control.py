@@ -140,6 +140,71 @@ def shutdown(ctrl: Controller):
     ctrl.close()
 
 
+def drain_feedback(ctrl: Controller, iters: int = 8, sleep_s: float = 0.005) -> None:
+    """Drain the controller's RX buffer.
+
+    A single poll_feedback_once only consumes a fraction of pending serial
+    bytes. On a multi-motor bus that means register reads (used by
+    ensure_mode) often time out with "register N not received within Xs"
+    because their reply got buried behind unread frames. Call this before
+    and after enable_all/ensure_mode bursts to keep the buffer clean.
+    """
+    for _ in range(iters):
+        try:
+            ctrl.poll_feedback_once()
+        except Exception:
+            pass
+        time.sleep(sleep_s)
+
+
+def ensure_mode_all(
+    ctrl: Controller,
+    handles: list,
+    mode: Mode,
+    *,
+    names: list[str] | None = None,
+    enable_after: bool = True,
+    settle_s: float = 0.2,
+    pre_each: Callable[[int], None] | None = None,
+) -> None:
+    """Switch every handle into `mode`, drain feedback around each call,
+    then optionally enable_all.
+
+    Args:
+        ctrl: shared Controller.
+        handles: motor handles to switch.
+        mode: target Mode (MIT / POS_VEL / VEL).
+        names: optional labels used in warning prints.
+        enable_after: whether to call ctrl.enable_all() at the end.
+        settle_s: sleep after enable_all to let firmware settle.
+        pre_each: optional callback(i) invoked before each handle's
+                  ensure_mode (e.g. to write POS_VEL PI registers).
+    """
+    drain_feedback(ctrl)
+    for i, h in enumerate(handles):
+        if pre_each is not None:
+            try:
+                pre_each(i)
+            except Exception as e:
+                label = names[i] if names else f"motor[{i}]"
+                print(f"  [warn] {label} pre-mode setup: {e}")
+        try:
+            h.ensure_mode(mode, 1000)
+        except CallError as e:
+            label = names[i] if names else f"motor[{i}]"
+            print(f"  [warn] {label} mode switch: {e}")
+        drain_feedback(ctrl, iters=4)
+        time.sleep(0.05)
+
+    if enable_after:
+        try:
+            ctrl.enable_all()
+        except CallError as e:
+            print(f"  [warn] enable_all: {e}")
+        drain_feedback(ctrl)
+        time.sleep(settle_s)
+
+
 # ── Recording ─────────────────────────────────────────────────────────
 
 def record_trajectory(

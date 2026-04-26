@@ -29,6 +29,7 @@ from motorbridge import CallError
 
 from . import safety  # noqa: F401  (import side-effect: extends BLOCKED_COMBOS)
 from .arm_cli import ButtonEdge, MultiTap, gripper_loop
+from . import arm_control
 from .arm_control import (
     load_motors,
     load_recording,
@@ -109,17 +110,11 @@ class ArmManager:
                     print(f"    {m['name']}: id=0x{m['motor_id']:02x} model={m['model']}")
 
                 from motorbridge import Mode
-                for h in self._handles:
-                    try:
-                        h.ensure_mode(Mode.MIT, 1000)
-                    except CallError:
-                        pass
-                    time.sleep(0.05)
-                try:
-                    self._ctrl.enable_all()
-                except CallError:
-                    pass
-                time.sleep(0.3)
+                arm_control.ensure_mode_all(
+                    self._ctrl, self._handles, Mode.MIT,
+                    names=[m["name"] for m in self.all_motors],
+                    settle_s=0.3,
+                )
 
                 self._start_gripper()
                 self._start_hold()
@@ -547,17 +542,7 @@ def _do_record(ctrl, handles, all_motors, arm_motors, arm_names, rumble, args):
         time.sleep(0.15)
         rumble.pulse()
 
-    for h in handles[:n_arm]:
-        try:
-            h.ensure_mode(Mode.MIT, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(ctrl, handles[:n_arm], Mode.MIT)
 
     rec_stop = threading.Event()
 
@@ -585,17 +570,7 @@ def _do_record(ctrl, handles, all_motors, arm_motors, arm_names, rumble, args):
         print(f"  Recording saved: {filepath.name}")
         print(f"  Active recording set to: {filepath.name}")
 
-    for h in handles[:n_arm]:
-        try:
-            h.ensure_mode(Mode.MIT, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(ctrl, handles[:n_arm], Mode.MIT)
 
     print("  IDLE — waiting for command...")
     return filepath
@@ -631,26 +606,20 @@ def _do_replay(ctrl, arm_handles, arm_motors, handles, all_motors, rumble, args,
     if rumble.available:
         rumble.pulse()
 
-    for i, (h, m) in enumerate(zip(arm_handles, arm_motors)):
-        try:
-            h.write_register_f32(25, m["vel_kp"])
-            h.write_register_f32(26, m["vel_ki"])
-            h.write_register_f32(27, m["pos_kp"])
-            h.write_register_f32(28, m["pos_ki"])
-            time.sleep(0.02)
-        except Exception:
-            pass
-        try:
-            h.ensure_mode(Mode.POS_VEL, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
+    def _write_posvel_pi(i: int) -> None:
+        m = arm_motors[i]
+        h = arm_handles[i]
+        h.write_register_f32(25, m["vel_kp"])
+        h.write_register_f32(26, m["vel_ki"])
+        h.write_register_f32(27, m["pos_kp"])
+        h.write_register_f32(28, m["pos_ki"])
+        time.sleep(0.02)
 
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(
+        ctrl, arm_handles, Mode.POS_VEL,
+        names=[m["name"] for m in arm_motors],
+        pre_each=_write_posvel_pi,
+    )
 
     replay_stop = threading.Event()
 
@@ -667,17 +636,7 @@ def _do_replay(ctrl, arm_handles, arm_motors, handles, all_motors, rumble, args,
         time.sleep(0.15)
         rumble.pulse()
 
-    for h in arm_handles:
-        try:
-            h.ensure_mode(Mode.MIT, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(ctrl, arm_handles, Mode.MIT)
 
     print("\n  IDLE — waiting for command...")
 

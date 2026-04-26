@@ -31,6 +31,7 @@ from go2_driver.gamepad import (
 )
 from motorbridge import CallError, Mode
 
+from . import arm_control
 from .arm_control import (
     list_recordings,
     load_motors,
@@ -245,18 +246,9 @@ def main():
         print("  Zeros set.")
 
     # Switch arm motors to MIT mode (for idle / record)
-    for i, h in enumerate(handles):
-        try:
-            h.ensure_mode(Mode.MIT, 1000)
-        except CallError as e:
-            print(f"  [warn] {names[i]} mode switch: {e}")
-        time.sleep(0.05)
-
-    try:
-        ctrl.enable_all()
-    except CallError as e:
-        print(f"  [warn] enable_all: {e}")
-    time.sleep(0.3)
+    arm_control.ensure_mode_all(
+        ctrl, handles, Mode.MIT, names=names, settle_s=0.3,
+    )
 
     # ── Start gamepad thread ──────────────────────────────────────
     gp_state = ControllerState()
@@ -343,17 +335,7 @@ def _do_record(args, ctrl, handles, all_motors, arm_motors, arm_names,
 
     # Re-enable MIT mode on arm motors (they may be in POS_VEL from replay)
     n_arm = len(arm_motors)
-    for h in handles[:n_arm]:
-        try:
-            h.ensure_mode(Mode.MIT, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(ctrl, handles[:n_arm], Mode.MIT)
 
     rec_stop = threading.Event()
 
@@ -379,17 +361,7 @@ def _do_record(args, ctrl, handles, all_motors, arm_motors, arm_names,
         print(f"  Recording saved: {filepath.name}")
 
     # Re-enable arm motors for idle (skip gripper — it stays POS_VEL)
-    for h in handles[:n_arm]:
-        try:
-            h.ensure_mode(Mode.MIT, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(ctrl, handles[:n_arm], Mode.MIT)
 
     print("  IDLE — waiting for command...")
 
@@ -416,27 +388,21 @@ def _do_replay(args, ctrl, arm_handles, arm_motors, handles, all_motors,
     if rumble.available:
         rumble.pulse()
 
-    # Switch arm motors to POS_VEL
-    for i, (h, m) in enumerate(zip(arm_handles, arm_motors)):
-        try:
-            h.write_register_f32(25, m["vel_kp"])
-            h.write_register_f32(26, m["vel_ki"])
-            h.write_register_f32(27, m["pos_kp"])
-            h.write_register_f32(28, m["pos_ki"])
-            time.sleep(0.02)
-        except Exception:
-            pass
-        try:
-            h.ensure_mode(Mode.POS_VEL, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
+    # Switch arm motors to POS_VEL (with PI register writes per joint)
+    def _write_posvel_pi(i: int) -> None:
+        m = arm_motors[i]
+        h = arm_handles[i]
+        h.write_register_f32(25, m["vel_kp"])
+        h.write_register_f32(26, m["vel_ki"])
+        h.write_register_f32(27, m["pos_kp"])
+        h.write_register_f32(28, m["pos_ki"])
+        time.sleep(0.02)
 
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(
+        ctrl, arm_handles, Mode.POS_VEL,
+        names=[m["name"] for m in arm_motors],
+        pre_each=_write_posvel_pi,
+    )
 
     replay_stop = threading.Event()
 
@@ -454,17 +420,7 @@ def _do_replay(args, ctrl, arm_handles, arm_motors, handles, all_motors,
         rumble.pulse()
 
     # Switch arm motors back to MIT for idle (skip gripper — it stays POS_VEL)
-    for h in arm_handles:
-        try:
-            h.ensure_mode(Mode.MIT, 1000)
-        except CallError:
-            pass
-        time.sleep(0.05)
-    try:
-        ctrl.enable_all()
-    except CallError:
-        pass
-    time.sleep(0.2)
+    arm_control.ensure_mode_all(ctrl, arm_handles, Mode.MIT)
 
     print("\n  IDLE — waiting for command...")
 
