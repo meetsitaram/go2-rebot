@@ -91,10 +91,10 @@ def gripper_loop(
     kp = GRIPPER_MIT_KP
     kd = GRIPPER_MIT_KD
 
-    try:
-        grip_handle.ensure_mode(Mode.MIT, 1000)
-    except CallError as e:
-        print(f"  [warn] gripper mode switch: {e}")
+    arm_control.ensure_mode_all(
+        ctrl, [grip_handle], Mode.MIT,
+        names=["gripper"], enable_after=False, settle_s=0.05,
+    )
 
     # Read initial position
     try:
