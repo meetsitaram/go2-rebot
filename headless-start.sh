@@ -2,8 +2,15 @@
 set -e
 cd "$(dirname "$0")"
 
+# Primary target — the Go2 dog's AP (full robot+arm control).
 GO2_SSID="Go2_55149"
-SCAN_TIMEOUT=120
+
+# Fallback wifi — when the dog isn't around. Run arm-only here so the
+# system is still useful (the dog won't be directly reachable on this
+# network without an --ip override).
+FALLBACK_SSID="Frontier:Robots"
+
+SCAN_TIMEOUT=60        # how long to wait for the Go2 AP before giving up
 SCAN_INTERVAL=5
 VENV=".venv/bin"
 
@@ -28,13 +35,21 @@ done
 if [ "$FOUND" = true ]; then
     echo "  ${GO2_SSID} found! Switching WiFi..."
     if nmcli connection up "${GO2_SSID}" 2>&1; then
-        echo "  Connected to ${GO2_SSID} — starting Go2 ReBot (AP mode)"
+        echo "  Connected to ${GO2_SSID} — starting Go2 ReBot (AP mode, full)"
         exec "${VENV}/go2-rebot" --connection-mode ap --wait-for-gamepad 0
-    else
-        echo "  ERROR: Failed to connect to ${GO2_SSID} — exiting (systemd will retry)"
-        exit 1
     fi
+    echo "  WARN: Failed to bring up ${GO2_SSID}, will try fallback."
+fi
+
+echo "  ${GO2_SSID} not available — falling back to ${FALLBACK_SSID}..."
+if nmcli -t -f NAME connection show | grep -qx "${FALLBACK_SSID}"; then
+    if nmcli connection up "${FALLBACK_SSID}" 2>&1; then
+        echo "  Connected to ${FALLBACK_SSID} — starting arm-only mode"
+        exec "${VENV}/go2-rebot-arm" --wait-for-gamepad 0
+    fi
+    echo "  ERROR: Failed to bring up ${FALLBACK_SSID} — exiting (systemd will retry)"
+    exit 1
 else
-    echo "  ${GO2_SSID} not found after ${SCAN_TIMEOUT}s — exiting (systemd will retry)"
+    echo "  ERROR: No NetworkManager connection profile for ${FALLBACK_SSID} — exiting"
     exit 1
 fi

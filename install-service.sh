@@ -7,9 +7,10 @@ DEST="/etc/systemd/system/${SERVICE_NAME}.service"
 POLKIT_FILE="/etc/polkit-1/localauthority/50-local.d/allow-$(whoami)-network.pkla"
 
 usage() {
-    echo "Usage: $0 [--install | --uninstall | --status]"
+    echo "Usage: $0 [--install | --update | --uninstall | --status]"
     echo ""
     echo "  --install     Install and enable the systemd service"
+    echo "  --update      git pull, sync deps, refresh service file, restart"
     echo "  --uninstall   Stop, disable, and remove the systemd service"
     echo "  --status      Show service status"
     echo ""
@@ -55,6 +56,43 @@ PKLA
     echo "  sudo systemctl start ${SERVICE_NAME}"
 }
 
+do_update() {
+    REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+    echo "Updating ${SERVICE_NAME} from ${REPO_DIR}..."
+
+    cd "$REPO_DIR"
+
+    echo "  → git pull"
+    git pull --ff-only
+
+    if command -v uv >/dev/null 2>&1; then
+        echo "  → uv sync"
+        uv sync
+    elif [ -x "$HOME/.local/bin/uv" ]; then
+        echo "  → uv sync"
+        "$HOME/.local/bin/uv" sync
+    else
+        echo "  WARN: uv not found, skipping dep sync"
+    fi
+
+    if [ -f "$SERVICE_FILE" ]; then
+        if ! sudo cmp -s "$SERVICE_FILE" "$DEST" 2>/dev/null; then
+            echo "  → refreshing service unit"
+            sudo cp "$SERVICE_FILE" "$DEST"
+            sudo systemctl daemon-reload
+        else
+            echo "  → service unit unchanged"
+        fi
+    fi
+
+    echo "  → restart ${SERVICE_NAME}"
+    sudo systemctl restart "${SERVICE_NAME}.service"
+
+    echo ""
+    echo "Updated. Tail logs with:"
+    echo "  journalctl -u ${SERVICE_NAME} -f"
+}
+
 do_uninstall() {
     echo "Uninstalling ${SERVICE_NAME} service..."
     sudo systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
@@ -76,6 +114,9 @@ do_status() {
 case "${1:-}" in
     --install)
         do_install
+        ;;
+    --update)
+        do_update
         ;;
     --uninstall)
         do_uninstall
