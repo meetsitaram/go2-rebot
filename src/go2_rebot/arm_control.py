@@ -536,16 +536,18 @@ def _resolve_recording(filepath: Path | None, name: str) -> Path | None:
 
     if name:
         pattern = str(RECORDINGS_DIR / f"{name}_*.csv")
-        matches = sorted(globmod.glob(pattern))
+        matches = [Path(p) for p in globmod.glob(pattern)]
         if matches:
-            return Path(matches[-1])
+            matches.sort(key=lambda p: p.stat().st_mtime)
+            return matches[-1]
         print(f"  ERROR: No recordings matching '{name}'")
         return None
 
     pattern = str(RECORDINGS_DIR / "*.csv")
-    matches = sorted(globmod.glob(pattern))
+    matches = [Path(p) for p in globmod.glob(pattern)]
     if matches:
-        return Path(matches[-1])
+        matches.sort(key=lambda p: p.stat().st_mtime)
+        return matches[-1]
     print(f"  ERROR: No recordings in {RECORDINGS_DIR}")
     return None
 
