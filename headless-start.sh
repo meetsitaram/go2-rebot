@@ -42,14 +42,9 @@ if [ "$FOUND" = true ]; then
 fi
 
 echo "  ${GO2_SSID} not available — falling back to ${FALLBACK_SSID}..."
-if nmcli -t -f NAME connection show | grep -qx "${FALLBACK_SSID}"; then
-    if nmcli connection up "${FALLBACK_SSID}" 2>&1; then
-        echo "  Connected to ${FALLBACK_SSID} — starting arm-only mode"
-        exec "${VENV}/go2-rebot-arm" --wait-for-gamepad 0
-    fi
-    echo "  ERROR: Failed to bring up ${FALLBACK_SSID} — exiting (systemd will retry)"
-    exit 1
-else
-    echo "  ERROR: No NetworkManager connection profile for ${FALLBACK_SSID} — exiting"
-    exit 1
+if nmcli connection up "${FALLBACK_SSID}" 2>&1; then
+    echo "  Connected to ${FALLBACK_SSID} — starting arm-only mode"
+    exec "${VENV}/go2-rebot-arm" --wait-for-gamepad 0
 fi
+echo "  ERROR: Failed to bring up ${FALLBACK_SSID} — exiting (systemd will retry)"
+exit 1
