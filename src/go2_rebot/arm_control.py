@@ -234,6 +234,11 @@ def record_trajectory(
     samples: list[list[float]] = []
     rec_t0 = 0.0
 
+    print(
+        f"  WAITING — hold arm still for ~{AUTOHOLD_DELAY_S:.0f}s "
+        f"to engage hold, then shake to START. (hz={hz})"
+    )
+
     def _notify(p: str):
         nonlocal phase
         phase = p
@@ -244,6 +249,12 @@ def record_trajectory(
         for i in range(n):
             hold_pos[i] = float(cur_arr[i])
         holding.set()
+        print(
+            "  Hold engaged "
+            f"(deviation < {math.degrees(AUTOHOLD_THRESHOLD_RAD):.1f}° "
+            f"for {AUTOHOLD_DELAY_S:.0f}s). "
+            f"Shake arm > {math.degrees(SHAKE_THRESHOLD_RAD):.0f}° to start recording."
+        )
 
     def _release_hold():
         holding.clear()
@@ -277,15 +288,29 @@ def record_trajectory(
     motor_thread = threading.Thread(target=_motor_loop, daemon=True)
     motor_thread.start()
 
+    time.sleep(0.2)
+    sample = read_positions(handles)
+    nonzero = sum(1 for v in sample if abs(v) > 1e-6)
+    if nonzero == 0:
+        print(
+            "  WARNING: all motor positions read 0.0 — feedback may be missing. "
+            "Check that motors are powered and ensure_mode succeeded."
+        )
+
     # Recording thread
     rec_dt = 1.0 / hz
 
     def _record_loop():
+        last_log = 0.0
         while not stop_event.is_set():
             if phase == "RECORDING":
                 now = time.perf_counter()
                 pos = read_positions(arm_handles)
-                samples.append([now - rec_t0] + pos)
+                t = now - rec_t0
+                samples.append([t] + pos)
+                if now - last_log >= 2.0:
+                    print(f"  recording… t={t:5.1f}s  samples={len(samples)}")
+                    last_log = now
                 elapsed = time.perf_counter() - now
                 slp = rec_dt - elapsed
                 if slp > 0:
@@ -332,8 +357,16 @@ def record_trajectory(
                 if phase == "WAITING":
                     rec_t0 = time.perf_counter()
                     _release_hold()
+                    print(
+                        f"  Shake detected ({math.degrees(deviation):.1f}°) "
+                        "→ RECORDING"
+                    )
                     _notify("RECORDING")
                 elif phase == "RECORDING":
+                    print(
+                        f"  Shake detected ({math.degrees(deviation):.1f}°) "
+                        f"→ DONE  (samples={len(samples)})"
+                    )
                     _notify("DONE")
 
         time.sleep(0.05)
